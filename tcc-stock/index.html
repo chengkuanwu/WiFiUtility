@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>台泥歷史股價</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root { --bg:#f7f7f5; --card:#fff; --fg:#1d1d1f; --muted:#6b6b70; --line:#e3e3e0; --up:#d0342c; --down:#1a8a4a; --accent:#2f5bd3; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#141416; --card:#1e1e21; --fg:#ececee; --muted:#9a9aa0; --line:#2e2e33; --up:#ff6159; --down:#3fc77a; --accent:#7f9dff; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui,-apple-system,"PingFang TC","Noto Sans TC",sans-serif; }
+  main { max-width:1100px; margin:0 auto; padding:24px 16px 48px; }
+  h1 { font-size:24px; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; }
+  .controls { display:flex; flex-wrap:wrap; gap:12px; align-items:end; }
+  label { display:flex; flex-direction:column; font-size:13px; color:var(--muted); gap:4px; }
+  input, button { font:inherit; padding:7px 10px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--fg); }
+  button { cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .quick button { padding:5px 10px; font-size:13px; }
+  .quick { display:flex; gap:6px; flex-wrap:wrap; }
+  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px; }
+  .stat .k { font-size:13px; color:var(--muted); }
+  .stat .v { font-size:22px; font-weight:600; font-variant-numeric:tabular-nums; }
+  .up { color:var(--up); } .down { color:var(--down); }
+  #status { color:var(--muted); font-size:14px; min-height:1.5em; }
+  #status.err { color:var(--up); }
+  .chart-wrap { position:relative; height:340px; }
+  .vol-wrap { position:relative; height:120px; margin-top:8px; }
+  .table-wrap { overflow-x:auto; max-height:480px; overflow-y:auto; }
+  table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; font-size:14px; }
+  th, td { padding:6px 10px; text-align:right; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th:first-child, td:first-child { text-align:left; }
+  th { position:sticky; top:0; background:var(--card); color:var(--muted); font-weight:500; }
+  .row { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; gap:8px; flex-wrap:wrap; }
+  .row h2 { font-size:16px; margin:0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>台泥（1101）歷史股價</h1>
+  <p class="sub">資料來源：FinMind 開放資料（失敗時改用證交所 TWSE）。開啟網頁即自動抓取最近一年資料。</p>
+
+  <div class="card">
+    <div class="controls">
+      <label>股票代號 <input id="stock" value="1101" size="6"></label>
+      <label>起始日 <input type="date" id="start"></label>
+      <label>結束日 <input type="date" id="end"></label>
+      <label>FinMind Token（選填）<input id="token" placeholder="提高請求上限用" size="18"></label>
+      <button class="primary" id="fetchBtn">抓取資料</button>
+      <button id="csvBtn" disabled>下載 CSV</button>
+    </div>
+    <div class="quick" style="margin-top:12px">
+      <button data-m="1">1 個月</button><button data-m="3">3 個月</button><button data-m="6">6 個月</button>
+      <button data-m="12">1 年</button><button data-m="36">3 年</button><button data-m="60">5 年</button><button data-m="120">10 年</button>
+    </div>
+    <p id="status"></p>
+  </div>
+
+  <div class="card stats" id="stats"></div>
+
+  <div class="card">
+    <div class="row"><h2>收盤價走勢</h2></div>
+    <div class="chart-wrap"><canvas id="priceChart"></canvas></div>
+    <div class="vol-wrap"><canvas id="volChart"></canvas></div>
+  </div>
+
+  <div class="card">
+    <div class="row"><h2>每日行情</h2><span id="count" class="sub" style="margin:0"></span></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>日期</th><th>開盤</th><th>最高</th><th>最低</th><th>收盤</th><th>漲跌</th><th>成交量（張）</th><th>成交金額（千元）</th></tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const fmtDate = d => d.toISOString().slice(0, 10);
+const num = (v, d = 2) => v == null || isNaN(v) ? '-' : Number(v).toLocaleString('zh-TW', { minimumFractionDigits: d, maximumFractionDigits: d });
+let rows = [], priceChart, volChart;
+
+function setRange(months) {
+  const end = new Date(), start = new Date();
+  start.setMonth(start.getMonth() - months);
+  $('start').value = fmtDate(start);
+  $('end').value = fmtDate(end);
+}
+
+function status(msg, err = false) { $('status').textContent = msg; $('status').className = err ? 'err' : ''; }
+
+// FinMind: one request for the whole range
+async function fetchFinMind(stock, start, end, token) {
+  const url = new URL('https://api.finmindtrade.com/api/v4/data');
+  url.search = new URLSearchParams({ dataset: 'TaiwanStockPrice', data_id: stock, start_date: start, end_date: end });
+  const headers = token ? { Authorization: 'Bearer ' + token } : {};
+  const res = await fetch(url, { headers });
+  const json = await res.json();
+  if (json.status !== 200) throw new Error(json.msg || 'FinMind 回傳錯誤');
+  return json.data.map(r => ({
+    date: r.date, open: r.open, high: r.max, low: r.min, close: r.close,
+    change: r.spread, volume: r.Trading_Volume / 1000, amount: r.Trading_money / 1000,
+  }));
+}
+
+// TWSE: one request per month; dates are ROC calendar (e.g. 115/10/01)
+async function fetchTWSE(stock, start, end) {
+  const out = [];
+  const cur = new Date(start.slice(0, 7) + '-01'), last = new Date(end);
+  const toNum = s => parseFloat(String(s).replace(/,/g, '').replace(/^X/, ''));
+  while (cur <= last) {
+    const ym = cur.getFullYear() + String(cur.getMonth() + 1).padStart(2, '0');
+    status(`從證交所抓取 ${ym} …`);
+    const res = await fetch(`https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date=${ym}01&stockNo=${stock}`);
+    const json = await res.json();
+    for (const r of json.data || []) {
+      const [y, m, d] = r[0].split('/');
+      const date = `${+y + 1911}-${m}-${d}`;
+      if (date < start || date > end) continue;
+      out.push({ date, volume: toNum(r[1]) / 1000, amount: toNum(r[2]) / 1000, open: toNum(r[3]),
+        high: toNum(r[4]), low: toNum(r[5]), close: toNum(r[6]), change: toNum(r[7]) });
+    }
+    cur.setMonth(cur.getMonth() + 1);
+    await new Promise(r => setTimeout(r, 300)); // TWSE rate-limits rapid requests
+  }
+  return out;
+}
+
+async function load() {
+  const stock = $('stock').value.trim(), start = $('start').value, end = $('end').value, token = $('token').value.trim();
+  if (!stock || !start || !end || start > end) return status('請確認股票代號與日期區間', true);
+  $('fetchBtn').disabled = true;
+  status('從 FinMind 抓取中 …');
+  try {
+    rows = await fetchFinMind(stock, start, end, token);
+  } catch (e) {
+    console.warn('FinMind failed:', e);
+    try { rows = await fetchTWSE(stock, start, end); }
+    catch (e2) { console.warn('TWSE failed:', e2); rows = []; status('抓取失敗：' + (e2.message || e.message) + '（可能是網路或 API 限制，請稍後再試或填入 FinMind Token）', true); }
+  }
+  $('fetchBtn').disabled = false;
+  if (!rows.length) { if (!$('status').classList.contains('err')) status('此區間沒有資料', true); render(); return; }
+  rows.sort((a, b) => a.date.localeCompare(b.date));
+  status(`已載入 ${rows.length} 筆交易日資料（${rows[0].date} ~ ${rows.at(-1).date}），更新於 ${new Date().toLocaleTimeString('zh-TW')}`);
+  try { localStorage.setItem('tcc-range', JSON.stringify({ stock, token })); } catch {}
+  render();
+}
+
+function render() {
+  $('csvBtn').disabled = !rows.length;
+  $('count').textContent = rows.length ? `共 ${rows.length} 筆` : '';
+  // stats
+  if (rows.length) {
+    const first = rows[0], last = rows.at(-1);
+    const hi = Math.max(...rows.map(r => r.high)), lo = Math.min(...rows.map(r => r.low));
+    const pct = (last.close - first.close) / first.close * 100;
+    const cls = v => v > 0 ? 'up' : v < 0 ? 'down' : '';
+    $('stats').innerHTML = [
+      ['最新收盤', num(last.close), cls(last.change)],
+      ['當日漲跌', (last.change > 0 ? '+' : '') + num(last.change), cls(last.change)],
+      ['區間漲跌幅', (pct > 0 ? '+' : '') + num(pct) + '%', cls(pct)],
+      ['區間最高', num(hi), ''], ['區間最低', num(lo), ''],
+      ['平均成交量（張）', num(rows.reduce((s, r) => s + r.volume, 0) / rows.length, 0), ''],
+    ].map(([k, v, c]) => `<div class="stat"><div class="k">${k}</div><div class="v ${c}">${v}</div></div>`).join('');
+  } else $('stats').innerHTML = '<div class="stat"><div class="k">尚無資料</div></div>';
+  // table (newest first)
+  $('tbody').innerHTML = rows.slice().reverse().map(r => {
+    const c = r.change > 0 ? 'up' : r.change < 0 ? 'down' : '';
+    return `<tr><td>${r.date}</td><td>${num(r.open)}</td><td>${num(r.high)}</td><td>${num(r.low)}</td>
+      <td class="${c}">${num(r.close)}</td><td class="${c}">${r.change > 0 ? '+' : ''}${num(r.change)}</td>
+      <td>${num(r.volume, 0)}</td><td>${num(r.amount, 0)}</td></tr>`;
+  }).join('');
+  drawCharts();
+}
+
+function drawCharts() {
+  const css = getComputedStyle(document.documentElement);
+  const accent = css.getPropertyValue('--accent').trim(), muted = css.getPropertyValue('--muted').trim(), line = css.getPropertyValue('--line').trim();
+  const up = css.getPropertyValue('--up').trim(), down = css.getPropertyValue('--down').trim();
+  const labels = rows.map(r => r.date);
+  const scales = { x: { ticks: { color: muted, maxTicksLimit: 8 }, grid: { display: false } }, y: { ticks: { color: muted }, grid: { color: line } } };
+  priceChart?.destroy(); volChart?.destroy();
+  priceChart = new Chart($('priceChart'), {
+    type: 'line',
+    data: { labels, datasets: [{ label: '收盤價', data: rows.map(r => r.close), borderColor: accent, borderWidth: 2, pointRadius: 0, fill: false, tension: 0.1 }] },
+    options: { maintainAspectRatio: false, interaction: { mode: 'index', intersect: false }, plugins: { legend: { display: false },
+      tooltip: { callbacks: { afterBody: i => { const r = rows[i[0].dataIndex]; return [`開 ${num(r.open)}  高 ${num(r.high)}`, `低 ${num(r.low)}  量 ${num(r.volume, 0)} 張`]; } } } }, scales },
+  });
+  volChart = new Chart($('volChart'), {
+    type: 'bar',
+    data: { labels, datasets: [{ label: '成交量（張）', data: rows.map(r => r.volume), backgroundColor: rows.map(r => r.change >= 0 ? up : down) }] },
+    options: { maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { ...scales, x: { display: false } } },
+  });
+}
+
+function downloadCSV() {
+  const head = '日期,開盤,最高,最低,收盤,漲跌,成交量(張),成交金額(千元)\n';
+  const body = rows.map(r => [r.date, r.open, r.high, r.low, r.close, r.change, Math.round(r.volume), Math.round(r.amount)].join(',')).join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob(['﻿' + head + body], { type: 'text/csv' }));
+  a.download = `${$('stock').value}_${$('start').value}_${$('end').value}.csv`;
+  a.click();
+}
+
+document.querySelectorAll('.quick button').forEach(b => b.onclick = () => { setRange(+b.dataset.m); load(); });
+$('fetchBtn').onclick = load;
+$('csvBtn').onclick = downloadCSV;
+try { const s = JSON.parse(localStorage.getItem('tcc-range')); if (s?.token) $('token').value = s.token; } catch {}
+setRange(12);
+load(); // 自動抓取
+</script>
+</body>
+</html>
